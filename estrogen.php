@@ -4,9 +4,99 @@ declare( strict_types = 1 );
 
 error_reporting( E_ALL | E_STRICT );
 
+class EstrogenReceipt {
+
+	private $e;
+	private $id, $pid, $signal, $response;
+
+	public function __construct( Estrogen $e, int $id, int $pid, int $signal, $response ) {
+
+		$this->e = $e;
+
+		$this->id = $id;
+		$this->pid = $pid;
+		$this->signal = $signal;
+		$this->response = $response;
+
+	}
+
+	public function getId() : int {
+
+		return $this->id;
+
+	}
+
+	public function getPid() : int {
+
+		return $this->pid;
+
+	}
+
+	public function getSignal() : int {
+
+		return $this->signal;
+
+	}
+
+	public function getResponse() {
+
+		return $this->response;
+
+	}
+
+}
+
+class EstrogenManifest {
+
+	private $e;
+	private $id, $pid, $signal, $request;
+
+	public function __construct( Estrogen $e, int $id, int $pid, int $signal, $request ) {
+
+		$this->e = $e;
+
+		$this->id = $id;
+		$this->pid = $pid;
+		$this->signal = $signal;
+		$this->request = $request;
+
+	}
+
+	public function getId() : int {
+
+		return $this->id;
+
+	}
+
+	public function getPid() : int {
+
+		return $this->pid;
+
+	}
+
+	public function getSignal() : int {
+
+		return $this->signal;
+
+	}
+
+	public function getRequest() {
+
+		return $this->request;
+
+	}
+
+	public function sendResponse( $response ) {
+
+		$this->e->sendResponse( $this, $response );
+
+	}
+
+}
+
 class Estrogen {
 
-	const VERSION = '0.1';
+	const VERSION = '0.2';
 
 	private $pdo, $signal;
 
@@ -43,7 +133,9 @@ class Estrogen {
 				$stmt2->bindValue( ':id', (int) $request->id );
 				$stmt2->execute();
 
-				$handler( (int) $request->id, (int) $request->from_pid, (int) $request->from_signal, json_decode( $request->request ) );
+				$manifest = new EstrogenManifest( $this, (int) $request->id, (int) $request->from_pid, (int) $request->from_signal, json_decode( $request->request ) );
+
+				$handler( $manifest );
 
 			}
 
@@ -83,20 +175,22 @@ class Estrogen {
 		$stmt->bindValue( ':id', $id );
 		$stmt->execute();
 
-		return $response;
+		$receipt = new EstrogenReceipt( $this, $id, $pid, $signal, $response );
+
+		return $receipt;
 
 	}
 
-	public function sendResponse( int $id, int $pid, int $signal, $response ) : void {
+	public function sendResponse( EstrogenManifest $manifest, $response ) : void {
 
 		$stmt = $this->pdo->prepare( 'UPDATE "messages" SET "response" = :response WHERE "id" = :id LIMIT 1' );
 
 		$stmt->bindValue( ':response', json_encode( $response ) );
-		$stmt->bindValue( ':id', $id );
+		$stmt->bindValue( ':id', $manifest->getId() );
 
 		$stmt->execute();
 
-		posix_kill( $pid, $signal );
+		posix_kill( $manifest->getPid(), $manifest->getSignal() );
 
 	}
 
@@ -111,24 +205,26 @@ if( pcntl_fork() === 0 ) {
 
 	$e = new Estrogen( SIGUSR1, '/tmp/estrogen.db' );
 
-	$e->onRequest( function( $id, $pid, $signal, $request ) use( $e ) {
+	$e->onRequest( function( EstrogenManifest $manifest ) {
+
+		$request = $manifest->getRequest();
 
 		if( $request === 'status' ) {
 
-			$e->sendResponse( $id, $pid, $signal, 'you are my friend' );
+			$manifest->sendResponse( 'you are my friend' );
 
 		}
 
 		elseif( $request === 'shutdown' ) {
 
-			$e->sendResponse( $id, $pid, $signal, 'ok i will shutdown' );
+			$manifest->sendResponse( 'ok i will shutdown' );
 			exit;
 
 		}
 
 		else {
 
-			$e->sendResponse( $id, $pid, $signal, 'i do not understand' );
+			$manifest->sendResponse( 'i do not understand' );
 
 		}
 
@@ -148,14 +244,14 @@ $pid = (int) file_get_contents( '/tmp/estrogen.pid' );
 
 $e = new Estrogen( SIGUSR1, '/tmp/estrogen.db' );
 
-$response = $e->sendRequest( $pid, SIGUSR1, 'status' );
-var_dump( $response );
+$receipt = $e->sendRequest( $pid, SIGUSR1, 'status' );
+var_dump( $receipt->getResponse() );
 
-$response = $e->sendRequest( $pid, SIGUSR1, 'dfgdfgdfgsdgsgh' );
-var_dump( $response );
+$receipt = $e->sendRequest( $pid, SIGUSR1, 'dfgdfgdfgsdgsgh' );
+var_dump( $receipt->getResponse() );
 
-$response = $e->sendRequest( $pid, SIGUSR1, 'shutdown' );
-var_dump( $response );
+$receipt = $e->sendRequest( $pid, SIGUSR1, 'shutdown' );
+var_dump( $receipt->getResponse() );
 
 echo 'Waiting one second for server to shutdown...', PHP_EOL;
 sleep( 1 );
