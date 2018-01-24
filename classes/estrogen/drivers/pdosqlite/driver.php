@@ -41,7 +41,7 @@ class Driver implements Estrogen\Interfaces\Driver {
 
 	}
 
-	public function fetchResponse( Estrogen\Interfaces\Receipt $receipt ) : ?Estrogen\Interfaces\Receipt {
+	public function fetchResponse( Estrogen\Interfaces\Receipt $receipt, int $time = null ) : ?Estrogen\Interfaces\Receipt {
 
 		$stmt = $this->pdo->prepare( 'SELECT "serverpid", "serversignal", "response" FROM "messages" WHERE "id" = :id AND "replied" = 1 LIMIT 1' );
 		$stmt->bindValue( ':id', $receipt->getId() );
@@ -56,7 +56,7 @@ class Driver implements Estrogen\Interfaces\Driver {
 		if( $response === false )
 		return null;
 
-		return new Receipt( $this->estrogen, $this, $receipt->getId(), $receipt->getPid(), $receipt->getSignal(), json_decode( $response->response ) );
+		return new Receipt( $this->estrogen, $this, $receipt->getId(), $receipt->getPid(), $receipt->getSignal(), json_decode( $response->response ), $time );
 
 	}
 
