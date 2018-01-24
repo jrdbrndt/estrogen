@@ -4,14 +4,101 @@ declare( strict_types = 1 );
 
 error_reporting( E_ALL | E_STRICT );
 
+class EstrogenDriver {
+
+	private $estrogen;
+	private $pdo;
+
+	public function __construct( Estrogen $estrogen, string $database ) {
+
+		$this->estrogen = $estrogen;
+
+		$this->pdo = new PDO( 'sqlite:' . $database );
+
+		$this->pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
+		$this->pdo->setAttribute( PDO::ATTR_EMULATE_PREPARES, false );
+		$this->pdo->setAttribute( PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ );
+
+		$this->pdo->exec( 'DROP TABLE IF EXISTS "messages"' );
+		$this->pdo->exec( 'CREATE TABLE "messages" ( "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "clientpid" INTEGER NOT NULL, "clientsignal" INTEGER NOT NULL, "serverpid" INTEGER NOT NULL, "serversignal" INTEGER NOT NULL, "request" TEXT NOT NULL, "response" TEXT DEFAULT NULL, "received" INTEGER NOT NULL DEFAULT 0, "replied" INTEGER NOT NULL DEFAULT 0 )' );
+
+	}
+
+	public function sendRequest( int $clientpid, int $clientsignal, int $serverpid, int $serversignal, $request ) : EstrogenReceipt {
+
+		$stmt = $this->pdo->prepare( 'INSERT INTO "messages" ( "clientpid", "clientsignal", "serverpid", "serversignal", "request" ) VALUES ( :cpid, :csig, :spid, :ssig, :req )' );
+		$stmt->bindValue( ':cpid', $clientpid );
+		$stmt->bindValue( ':csig', $clientsignal );
+		$stmt->bindValue( ':spid', $serverpid );
+		$stmt->bindValue( ':ssig', $serversignal );
+		$stmt->bindValue( ':req', json_encode( $request ) );
+		$stmt->execute();
+
+		$id = (int) $this->pdo->lastInsertId();
+
+		return new EstrogenReceipt( $this->estrogen, $this, $id, $serverpid, $serversignal );
+
+	}
+
+	public function fetchResponse( EstrogenReceipt $receipt ) : ?EstrogenReceipt {
+
+		$stmt = $this->pdo->prepare( 'SELECT "serverpid", "serversignal", "response" FROM "messages" WHERE "id" = :id AND "replied" = 1 LIMIT 1' );
+		$stmt->bindValue( ':id', $receipt->getId() );
+		$stmt->execute();
+
+		$response = $stmt->fetch();
+
+		$stmt = $this->pdo->prepare( 'DELETE FROM "messages" WHERE "id" = :id LIMIT 1' );
+		$stmt->bindValue( ':id', $receipt->getId() );
+		$stmt->execute();
+
+		if( $response === false )
+		return null;
+
+		return new EstrogenReceipt( $this->estrogen, $this, $receipt->getId(), $receipt->getPid(), $receipt->getSignal(), json_decode( $response->response ) );
+
+	}
+
+	public function fetchManifest( int $serverpid, int $serversignal ) : ?EstrogenManifest {
+
+		$stmt = $this->pdo->prepare( 'SELECT "id", "clientpid", "clientsignal", "request" FROM "messages" WHERE "serverpid" = :pid AND "serversignal" = :signal AND "received" = 0 LIMIT 1' );
+		$stmt->bindValue( ':pid', $serverpid );
+		$stmt->bindValue( ':signal', $serversignal );
+		$stmt->execute();
+
+		$fetch = $stmt->fetch();
+
+		if( $fetch === false )
+		return null;
+
+		$stmt = $this->pdo->prepare( 'UPDATE "messages" SET "received" = 1 WHERE "id" = :id LIMIT 1' );
+		$stmt->bindValue( ':id', (int) $fetch->id );
+		$stmt->execute();
+
+		return new EstrogenManifest( $this->estrogen, $this, (int) $fetch->id, (int) $fetch->clientpid, (int) $fetch->clientsignal, json_decode( $fetch->request ) );
+
+	}
+
+	public function sendResponse( EstrogenManifest $manifest, $response ) : void {
+
+		$stmt = $this->pdo->prepare( 'UPDATE "messages" SET "response" = :response, "replied" = 1 WHERE "id" = :id AND "replied" = 0 LIMIT 1' );
+		$stmt->bindValue( ':response', json_encode( $response ) );
+		$stmt->bindValue( ':id', $manifest->getId() );
+		$stmt->execute();
+
+	}
+
+}
+
 class EstrogenReceipt {
 
-	private $e;
+	private $estrogen, $driver;
 	private $id, $pid, $signal, $response;
 
-	public function __construct( Estrogen $e, int $id, int $pid, int $signal, $response ) {
+	public function __construct( Estrogen $estrogen, EstrogenDriver $driver, int $id, int $pid, int $signal, $response = null ) {
 
-		$this->e = $e;
+		$this->estrogen = $estrogen;
+		$this->driver = $driver;
 
 		$this->id = $id;
 		$this->pid = $pid;
@@ -48,12 +135,13 @@ class EstrogenReceipt {
 
 class EstrogenManifest {
 
-	private $e;
+	private $estrogen, $driver;
 	private $id, $pid, $signal, $request;
 
-	public function __construct( Estrogen $e, int $id, int $pid, int $signal, $request ) {
+	public function __construct( Estrogen $estrogen, EstrogenDriver $driver, int $id, int $pid, int $signal, $request ) {
 
-		$this->e = $e;
+		$this->estrogen = $estrogen;
+		$this->driver = $driver;
 
 		$this->id = $id;
 		$this->pid = $pid;
@@ -88,7 +176,7 @@ class EstrogenManifest {
 
 	public function sendResponse( $response ) {
 
-		$this->e->sendResponse( $this, $response );
+		$this->estrogen->sendResponse( $this, $response );
 
 	}
 
@@ -96,25 +184,16 @@ class EstrogenManifest {
 
 class Estrogen {
 
-	const VERSION = '0.2';
+	const VERSION = '0.3';
 
-	private $pdo, $signal;
+	private $driver, $signal;
 
 	public function __construct( int $signal, string $database ) {
 
+		pcntl_signal( $signal, SIG_IGN );
+
 		$this->signal = $signal;
-
-		pcntl_signal( $this->signal, SIG_IGN );
-
-		$this->pdo = new PDO( 'sqlite:' . $database );
-
-		$this->pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
-		$this->pdo->setAttribute( PDO::ATTR_EMULATE_PREPARES, false );
-		$this->pdo->setAttribute( PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ );
-
-		$this->pdo->exec( 'DROP TABLE IF EXISTS "messages"' );
-
-		$this->pdo->exec( 'CREATE TABLE "messages" ( "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "from_pid" INTEGER NOT NULL, "from_signal" INTEGER NOT NULL, "to_pid" INTEGER NOT NULL, "request" TEXT NOT NULL, "response" TEXT DEFAULT NULL, "read" INTEGER NOT NULL DEFAULT 0 )' );
+		$this->driver = new EstrogenDriver( $this, $database );
 
 	}
 
@@ -122,22 +201,8 @@ class Estrogen {
 
 		pcntl_signal( $this->signal, function() use( $handler ) : void {
 
-			$stmt = $this->pdo->prepare( 'SELECT "id", "from_pid", "from_signal", "request" FROM "messages" WHERE "to_pid" = :pid AND "read" = 0 ORDER BY "id" ASC LIMIT 1' );
-			$stmt->bindValue( ':pid', posix_getpid() );
-			$stmt->execute();
-
-			$stmt2 = $this->pdo->prepare( 'UPDATE "messages" SET "read" = 1 WHERE "id" = :id LIMIT 1' );
-
-			while( ($request = $stmt->fetch()) !== false ) {
-
-				$stmt2->bindValue( ':id', (int) $request->id );
-				$stmt2->execute();
-
-				$manifest = new EstrogenManifest( $this, (int) $request->id, (int) $request->from_pid, (int) $request->from_signal, json_decode( $request->request ) );
-
-				$handler( $manifest );
-
-			}
+			while( ($manifest = $this->driver->fetchManifest( posix_getpid(), $this->signal )) !== null )
+			$handler( $manifest );
 
 		} );
 
@@ -145,18 +210,9 @@ class Estrogen {
 
 	public function sendRequest( int $pid, int $signal, $request ) {
 
-		$stmt = $this->pdo->prepare( 'INSERT INTO "messages" ( "from_pid", "from_signal", "to_pid", "request" ) VALUES ( :fpid, :fsig, :tpid, :req )' );
-
-		$stmt->bindValue( ':fpid', posix_getpid() );
-		$stmt->bindValue( ':fsig', $this->signal );
-		$stmt->bindValue( ':tpid', $pid );
-		$stmt->bindValue( ':req', json_encode( $request ) );
-
-		$stmt->execute();
-
-		$id = (int) $this->pdo->lastInsertId();
-
 		pcntl_sigprocmask( SIG_BLOCK, [ $this->signal ] );
+
+		$receipt = $this->driver->sendRequest( posix_getpid(), $this->signal, $pid, $signal, $request );
 
 		posix_kill( $pid, $signal );
 
@@ -164,18 +220,7 @@ class Estrogen {
 
 		pcntl_sigprocmask( SIG_UNBLOCK, [ $this->signal] );
 
-		$stmt = $this->pdo->prepare( 'SELECT "response" FROM "messages" WHERE "id" = :id LIMIT 1' );
-		$stmt->bindValue( ':id', $id );
-		$stmt->execute();
-
-		$response = $stmt->fetch();
-		$response = json_decode( $response->response );
-
-		$stmt = $this->pdo->prepare( 'DELETE FROM "messages" WHERE "id" = :id LIMIT 1' );
-		$stmt->bindValue( ':id', $id );
-		$stmt->execute();
-
-		$receipt = new EstrogenReceipt( $this, $id, $pid, $signal, $response );
+		$receipt = $this->driver->fetchResponse( $receipt );
 
 		return $receipt;
 
@@ -183,12 +228,7 @@ class Estrogen {
 
 	public function sendResponse( EstrogenManifest $manifest, $response ) : void {
 
-		$stmt = $this->pdo->prepare( 'UPDATE "messages" SET "response" = :response WHERE "id" = :id LIMIT 1' );
-
-		$stmt->bindValue( ':response', json_encode( $response ) );
-		$stmt->bindValue( ':id', $manifest->getId() );
-
-		$stmt->execute();
+		$this->driver->sendResponse( $manifest, $response );
 
 		posix_kill( $manifest->getPid(), $manifest->getSignal() );
 
